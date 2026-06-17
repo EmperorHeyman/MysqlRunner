@@ -5,6 +5,12 @@ MySQL Runner
 
 MySQL Runner handles only the **login and secure storage of credentials** phpMyAdminitself does all the database work. Save a server's URL, username and password (encryptedlocally), then double-click to open it in a browser tab that logs you in automatically.Open several servers side by side, each in its own isolated session.
 
+
+<img width="1194" height="831" alt="image" src="https://github.com/user-attachments/assets/31e3e8d6-8f60-4373-9dbb-5a0fa7ca17d2" />
+
+
+
+
 Features
 --------
 
