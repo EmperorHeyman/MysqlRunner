@@ -9,6 +9,9 @@ us from re-submitting endlessly if a login fails.
 from __future__ import annotations
 
 import json
+from functools import lru_cache
+
+from mysql_runner.paths import resource_path
 
 
 def build_login_script(username: str, password: str) -> str:
@@ -75,51 +78,53 @@ def build_login_form_present_script() -> str:
 """
 
 
-# Dark theme applied as a filter so it works regardless of phpMyAdmin version.
-_DARK_CSS = """
-:root { background:#1e1e1e !important; }
-html { background:#1e1e1e !important; }
-html.__mysql_runner_dark {
-    filter: invert(1) hue-rotate(180deg) !important;
-    background:#1e1e1e !important;
-}
-html.__mysql_runner_dark img,
-html.__mysql_runner_dark video,
-html.__mysql_runner_dark canvas,
-html.__mysql_runner_dark [style*="background-image"],
-html.__mysql_runner_dark .icon,
-html.__mysql_runner_dark svg {
-    filter: invert(1) hue-rotate(180deg) !important;
-}
-"""
+# Dark mode is delegated to Dark Reader (https://darkreader.org) — the same
+# open-source engine behind the browser extension. It reads each element's
+# *computed* colours at runtime and generates correct dark equivalents (text,
+# backgrounds, borders, even images), watching the DOM for changes. That avoids
+# the two failure modes of doing this by hand: a naive ``invert`` filter
+# (washed-out grey, miscoloured images) and a static stylesheet (missed
+# elements → white-on-white, smudged text). The library is vendored so the app
+# works offline and inside the PyInstaller build.
+_DARKREADER_RESOURCE = "mysql_runner/web/vendor/darkreader.js"
+
+
+@lru_cache(maxsize=1)
+def _darkreader_source() -> str:
+    """Return the vendored Dark Reader UMD source (cached after first read)."""
+    return resource_path(_DARKREADER_RESOURCE).read_text(encoding="utf-8")
+
+
+# Theme tuning: full brightness, slightly softened contrast so large white
+# tables don't glare, no sepia. Tweak here if you want a warmer/cooler dark.
+_DARKREADER_THEME = json.dumps({"brightness": 100, "contrast": 90, "sepia": 0})
 
 
 def build_dark_mode_script(enable: bool) -> str:
-    """Return JS that toggles a dark theme on the current document.
+    """Return JS that enables/disables Dark Reader on the current document.
 
-    Uses a CSS ``invert`` filter (re-inverting media) so it adapts to any
-    phpMyAdmin theme without targeting specific selectors.
+    When enabling, the vendored Dark Reader UMD source is injected once per
+    document (guarded by ``window.DarkReader``) and ``DarkReader.enable`` is
+    called; its dynamic engine then themes the page and keeps watching for DOM
+    changes. Disabling calls ``DarkReader.disable``, fully restoring phpMyAdmin's
+    stock light theme.
     """
-    css_js = json.dumps(_DARK_CSS)
-    enable_js = "true" if enable else "false"
+    if not enable:
+        return "try { if (window.DarkReader) { DarkReader.disable(); } } catch (e) {}"
+    try:
+        source = _darkreader_source()
+    except OSError:
+        # Library missing (e.g. not bundled): degrade to no-op rather than error.
+        return "/* dark mode unavailable: Dark Reader resource missing */"
     return f"""
-(function () {{
-    var enable = {enable_js};
-    var STYLE_ID = '__mysql_runner_dark_style';
-    var existing = document.getElementById(STYLE_ID);
-    if (!enable) {{
-        if (existing) {{ existing.remove(); }}
-        document.documentElement.classList.remove('__mysql_runner_dark');
-        return;
+try {{
+    if (!window.DarkReader) {{
+{source}
     }}
-    if (!existing) {{
-        var style = document.createElement('style');
-        style.id = STYLE_ID;
-        style.textContent = {css_js};
-        (document.head || document.documentElement).appendChild(style);
-    }}
-    document.documentElement.classList.add('__mysql_runner_dark');
-}})();
+    DarkReader.enable({_DARKREADER_THEME});
+}} catch (e) {{
+    if (window.console && console.warn) {{ console.warn('dark mode failed', e); }}
+}}
 """
 
 

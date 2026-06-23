@@ -23,18 +23,23 @@ from mysql_runner.ui.master_password_dialog import (
 )
 
 
-def _unlock_vault() -> vault_mod.Vault | None:
-    """Run the first-run / unlock flow, returning an open Vault or None."""
+def _unlock_vault(use_keyring: bool = True) -> vault_mod.Vault | None:
+    """Run the first-run / unlock flow, returning an open Vault or None.
+
+    When ``use_keyring`` is False the cached key is ignored and the master
+    password is always requested (used to honour "ask for password at start").
+    """
     if not vault_mod.is_initialized():
         dialog = CreateMasterPasswordDialog()
         if not dialog.exec():
             return None
         return vault_mod.initialize(dialog.password())
 
-    # Try the keyring cache first.
-    vault = vault_mod.unlock_with_keyring()
-    if vault is not None:
-        return vault
+    # Try the keyring cache first (unless the caller wants a password prompt).
+    if use_keyring:
+        vault = vault_mod.unlock_with_keyring()
+        if vault is not None:
+            return vault
 
     # Fall back to the master password (allow a few attempts).
     for _ in range(3):
@@ -75,12 +80,19 @@ def run() -> int:
     lock_holder: dict[str, object] = {}
 
     # Application-wide idle watcher that auto-locks after inactivity.
-    idle_watcher = IdleWatcher(settings.idle_lock_minutes)
+    idle_watcher = IdleWatcher(settings.effective_idle_lock_minutes())
     app.installEventFilter(idle_watcher)
     idle_watcher.idle.connect(lambda: _invoke(lock_holder.get("on_lock")))
 
-    def start_session() -> bool:
-        vault = _unlock_vault()
+    def on_settings_changed() -> None:
+        # Re-arm the idle watcher whenever the timeout preference changes.
+        idle_watcher.set_timeout(settings.effective_idle_lock_minutes())
+
+    def start_session(*, first_launch: bool = False) -> bool:
+        # Honour "ask for password at start" only on the initial launch; an
+        # in-session re-lock still uses the keyring (if it wasn't cleared).
+        use_keyring = not (first_launch and settings.prompt_on_start())
+        vault = _unlock_vault(use_keyring)
         if vault is None:
             return False
         try:
@@ -92,22 +104,27 @@ def run() -> int:
         def on_lock() -> None:
             idle_watcher.stop()
             vault.lock()
-            vault_mod.clear_keyring_cache()
+            # Keep the cached key only when the user opted to be remembered
+            # (or chose to stay logged in).
+            if not settings.keep_password_cached():
+                vault_mod.clear_keyring_cache()
             old = window_holder.pop("window", None)
             if old is not None:
                 old.close()
             if not start_session():
                 app.quit()
 
-        window = MainWindow(store, settings, on_lock=on_lock)
+        window = MainWindow(
+            store, settings, on_lock=on_lock, on_settings_changed=on_settings_changed
+        )
         window_holder["window"] = window
         lock_holder["on_lock"] = on_lock
         window.show()
         # (Re)start the idle countdown for the new session.
-        idle_watcher.set_timeout(settings.idle_lock_minutes)
+        idle_watcher.set_timeout(settings.effective_idle_lock_minutes())
         return True
 
-    if not start_session():
+    if not start_session(first_launch=True):
         return 0
 
     return app.exec()

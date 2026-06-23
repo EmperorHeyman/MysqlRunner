@@ -17,9 +17,16 @@ from pathlib import Path
 ROOT = Path().resolve()
 ICON_PATH = ROOT / "icon.ico"
 VERSION_PATH = ROOT / "version_info.txt"
+# Vendored Dark Reader engine used to theme phpMyAdmin (web/autologin.py).
+DARKREADER_PATH = ROOT / "mysql_runner" / "web" / "vendor" / "darkreader.js"
 
-# Ship the icon so the running app can set its window/taskbar icon too.
-datas = [(str(ICON_PATH), ".")]
+# Ship the icon so the running app can set its window/taskbar icon too, and the
+# Dark Reader library so dark mode works in the packaged build. The destination
+# mirrors the in-repo path so resource_path() resolves it the same way.
+datas = [
+    (str(ICON_PATH), "."),
+    (str(DARKREADER_PATH), "mysql_runner/web/vendor"),
+]
 binaries = []
 # PyInstaller's PyQt6 hooks collect required WebEngine modules/resources
 # from imports in code.

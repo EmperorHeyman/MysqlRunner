@@ -17,10 +17,6 @@ Open several servers side by side, each in its own isolated session.
 
 ---
 
-
-<img width="1194" height="831" alt="image" src="https://github.com/user-attachments/assets/31e3e8d6-8f60-4373-9dbb-5a0fa7ca17d2" />
-
-
 ## Features
 
 - **Encrypted credential vault** - a random Data Encryption Key protects every credential.
@@ -36,7 +32,9 @@ Open several servers side by side, each in its own isolated session.
 - **Session cloning** (`Ctrl+D`) - duplicate the current tab to get a second view into the
   **same** logged-in session (shared cookie jar) - inspect a table in one tab while you run a
   query in another.
-- **Dark mode** (`Ctrl+Shift+D`) - injects a CSS filter to tame phpMyAdmin's bright theme.
+- **Dark mode** (`Ctrl+Shift+D`) - themes phpMyAdmin with the bundled [Dark Reader](https://darkreader.org)
+  engine, which computes proper dark colours per element (text, backgrounds, borders, images)
+  instead of a flat invert filter.
 - **Environment badges** - mark servers as Dev / Staging / **Production**; production tabs
   get a red dot and tint so you never run a destructive query on the wrong server.
 - **Startup SQL** - optionally run a query automatically after login (e.g. `SET NAMES utf8;`).
@@ -137,11 +135,3 @@ mysql_runner/
 ## License
 
 Released under the MIT License. See [LICENSE](LICENSE).
-
-
-
-
-
-
-
-

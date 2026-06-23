@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QColor, QKeySequence, QShortcut
+import os
+
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QAction, QColor, QDesktopServices, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLineEdit,
@@ -19,11 +22,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from mysql_runner.crypto import vault as vault_mod
 from mysql_runner.storage.models import Environment, ServerProfile
 from mysql_runner.storage.portable import PortableError, export_profiles, import_profiles
 from mysql_runner.storage.settings import Settings
 from mysql_runner.storage.store import ServerStore
-from mysql_runner.ui.server_dialog import ServerDialog
+from mysql_runner.ui.master_password_dialog import ChangeMasterPasswordDialog
+from mysql_runner.ui.settings_dialog import SettingsDialog
 from mysql_runner.web.browser_tab import BrowserTab
 
 _NO_SELECTION = "No selection"
@@ -43,11 +48,13 @@ class MainWindow(QMainWindow):
         store: ServerStore,
         settings: Settings | None = None,
         on_lock=None,
+        on_settings_changed=None,
     ) -> None:
         super().__init__()
         self._store = store
         self._settings = settings or Settings()
         self._on_lock = on_lock
+        self._on_settings_changed = on_settings_changed
         # Reference counts for engine profiles shared between cloned tabs.
         self._profile_refs: dict[object, int] = {}
         self.setWindowTitle("MySQL Runner")
@@ -95,9 +102,14 @@ class MainWindow(QMainWindow):
         open_btn.clicked.connect(self._on_connect)
         sidebar_layout.addWidget(open_btn)
 
+        bottom_row = QHBoxLayout()
+        settings_btn = QPushButton("Settings…")
+        settings_btn.clicked.connect(self._open_settings)
         lock_btn = QPushButton("Lock")
         lock_btn.clicked.connect(self._on_lock_clicked)
-        sidebar_layout.addWidget(lock_btn)
+        bottom_row.addWidget(settings_btn)
+        bottom_row.addWidget(lock_btn)
+        sidebar_layout.addLayout(bottom_row)
 
         # Tabs.
         self._tabs = QTabWidget()
@@ -122,6 +134,9 @@ class MainWindow(QMainWindow):
         export_action.triggered.connect(self._on_export)
         import_action = QAction("&Import connections…", self)
         import_action.triggered.connect(self._on_import)
+        settings_action = QAction("&Settings…", self)
+        settings_action.setShortcut("Ctrl+,")
+        settings_action.triggered.connect(self._open_settings)
         lock_action = QAction("&Lock now", self)
         lock_action.triggered.connect(self._on_lock_clicked)
         quit_action = QAction("&Quit", self)
@@ -130,6 +145,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(export_action)
         file_menu.addAction(import_action)
         file_menu.addSeparator()
+        file_menu.addAction(settings_action)
         file_menu.addAction(lock_action)
         file_menu.addSeparator()
         file_menu.addAction(quit_action)
@@ -317,6 +333,7 @@ class MainWindow(QMainWindow):
     def _open_tab(self, profile: ServerProfile) -> None:
         tab = BrowserTab(profile, dark_mode=self._settings.dark_mode)
         self._register_profile(tab.engine_profile)
+        self._attach_downloads(tab)
         index = self._tabs.addTab(tab, profile.label)
         self._style_tab(index, profile)
         self._tabs.setCurrentIndex(index)
@@ -334,6 +351,7 @@ class MainWindow(QMainWindow):
             shared_profile=tab.engine_profile,
         )
         self._register_profile(clone.engine_profile)
+        self._attach_downloads(clone)
         index = self._tabs.addTab(clone, f"{source_profile.label} (clone)")
         self._style_tab(index, source_profile)
         self._tabs.setCurrentIndex(index)
@@ -412,10 +430,106 @@ class MainWindow(QMainWindow):
         enabled = self._dark_action.isChecked()
         self._settings.dark_mode = enabled
         self._settings.save()
+        self._apply_dark_mode_to_tabs(enabled)
+
+    def _apply_dark_mode_to_tabs(self, enabled: bool) -> None:
         for i in range(self._tabs.count()):
             widget = self._tabs.widget(i)
             if isinstance(widget, BrowserTab):
                 widget.set_dark_mode(enabled)
+
+    # ----- settings ------------------------------------------------------
+    def _open_settings(self) -> None:
+        dialog = SettingsDialog(
+            self._settings, self, on_change_password=self._change_master_password
+        )
+        if not dialog.exec():
+            return
+
+        if dialog.sidebar_visible() != self._settings.sidebar_visible:
+            self._settings.sidebar_visible = dialog.sidebar_visible()
+            self._sidebar.setVisible(self._settings.sidebar_visible)
+            self._sidebar_action.setChecked(self._settings.sidebar_visible)
+
+        if dialog.dark_mode() != self._settings.dark_mode:
+            self._settings.dark_mode = dialog.dark_mode()
+            self._dark_action.setChecked(self._settings.dark_mode)
+            self._apply_dark_mode_to_tabs(self._settings.dark_mode)
+
+        self._settings.idle_lock_minutes = dialog.idle_lock_minutes()
+        self._settings.ask_password_on_start = dialog.ask_password_on_start()
+        self._settings.remember_password = dialog.remember_password()
+        self._settings.stay_logged_in = dialog.stay_logged_in()
+        self._settings.save()
+
+        # Let the app re-arm the idle watcher with the new timeout.
+        if self._on_settings_changed is not None:
+            self._on_settings_changed()
+
+    def _change_master_password(self, parent) -> None:
+        dialog = ChangeMasterPasswordDialog(parent)
+        if not dialog.exec():
+            return
+        try:
+            vault_mod.change_master_password(
+                dialog.current_password(), dialog.new_password()
+            )
+        except vault_mod.InvalidMasterPassword:
+            QMessageBox.warning(
+                parent, "Incorrect password", "The current master password is incorrect."
+            )
+            return
+        except vault_mod.VaultError as exc:
+            QMessageBox.critical(parent, "Could not change password", str(exc))
+            return
+        QMessageBox.information(
+            parent, "Password changed", "Your master password has been updated."
+        )
+
+    # ----- downloads -----------------------------------------------------
+    def _attach_downloads(self, tab: BrowserTab) -> None:
+        # Connect once per engine profile. Clones share an already-connected
+        # profile, so only the tab that owns the profile wires the handler.
+        if tab.owns_profile:
+            tab.engine_profile.downloadRequested.connect(self._on_download_requested)
+
+    def _on_download_requested(self, download) -> None:
+        suggested = download.downloadFileName() or "download"
+        target, _ = QFileDialog.getSaveFileName(self, "Save download", suggested)
+        if not target:
+            download.cancel()
+            return
+        directory, filename = os.path.split(target)
+        if directory:
+            download.setDownloadDirectory(directory)
+        download.setDownloadFileName(filename or suggested)
+        download.accept()
+        name = filename or suggested
+        self.statusBar().showMessage(f"Downloading {name}…")
+        download.isFinishedChanged.connect(
+            lambda d=download, n=name: self._on_download_finished(d, n)
+        )
+
+    def _on_download_finished(self, download, name: str) -> None:
+        states = type(download).DownloadState
+        state = download.state()
+        if state == states.DownloadCompleted:
+            self.statusBar().showMessage(f"Saved {name}", 6000)
+            path = os.path.join(
+                download.downloadDirectory(), download.downloadFileName()
+            )
+            resp = QMessageBox.question(
+                self, "Download complete", f"Saved “{name}”.\n\nOpen it now?"
+            )
+            if resp == QMessageBox.StandardButton.Yes:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        elif state == states.DownloadInterrupted:
+            message = f"Download of “{name}” failed."
+            reason = download.interruptReasonString()
+            if reason:
+                message += f"\n\n{reason}"
+            QMessageBox.warning(self, "Download failed", message)
+            self.statusBar().showMessage(f"Download failed: {name}", 6000)
 
     # ----- lock ----------------------------------------------------------
     def _on_lock_clicked(self) -> None:
